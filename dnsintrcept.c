@@ -95,7 +95,6 @@ struct dns_question
 	u_int16_t qtype;
 	u_int16_t qclass;
 };
-
 //-------------------------------------- funcs -------------------------
 int init()
 {
@@ -132,6 +131,7 @@ int init()
 	sin.sin_family = AF_INET;
 	sin.sin_port = htons(dns_server.config.port);
 	sin.sin_addr.s_addr = inet_addr(dns_server.config.host);
+
 	rv = bind(sd, (struct sockaddr *)&sin, sizeof(sin));
 	if (rv < 0)
 	{
@@ -252,43 +252,79 @@ int dns_request_parse(struct dns_packet *pkt, void *data, u_int16_t size)
 	return 1;
 }
 
-#if 0
-           struct sockaddr_in {
-               sa_family_t    sin_family; /* address family: AF_INET */
-               in_port_t      sin_port;   /* port in network byte order */
-               struct in_addr sin_addr;   /* internet address */
-           }
-#endif
+
+//check if there is new whitelist and download
+void get_whitelist()
+{
+
+
+
+}
+
+//return 1 if in whitelist, 0 if not
+int in_whitelist(char *str)
+{
+	int rv = 0;
+
+	//TODO:
+	//go through list of whitelisted ip addresses
+	// if found - break and return 1
+	// else - return 0
+
+	return rv;
+}
 
 void dns_daemon()
 {
 	int req_size;
+	ssize_t sent_bytes;
 	int iph_length;
 	char str[INET_ADDRSTRLEN] = {0};
 	char buf[PACKET_SIZE+4] = {0};
+	char bufsend[PACKET_SIZE+4] = {0};
 	socklen_t from_len;
 	struct sockaddr_in from;
+	struct sockaddr_in dest_addr;
 	struct dns_packet *pkt;
 
-	from_len = sizeof (from);
+	from_len = sizeof(from);
+
+	//set dest addr
+	memset((char *)&dest_addr, 0x0, sizeof(dest_addr));
+        dest_addr.sin_family = AF_INET;
+        dest_addr.sin_port = htons(53);
+        dest_addr.sin_addr.s_addr = inet_addr("8.8.8.8");
 
 	printf("Accepting connections on %s\n", dns_server.config.host);
-	while(1)	
+	while(1)
 	{
+		get_whitelist();
+
+
+		//socket, buf, buf_size, addr_from,
 		req_size = recvfrom(dns_server.listenfd, buf, PACKET_SIZE+4, 0, 
 					(struct sockaddr *)&from, &from_len);
 		debug("client: %s, bytes: %d\n", strerror(errno), req_size);
 
-		if (req_size > 0)
+		if (req_size >= 12) //min size is 12 bytes
 		{
 			debug("-----packet dump-----:\n");
 			hexdump(buf, req_size);
 
 			if (from.sin_family == AF_INET)
 			{
+				//get ip address
 				inet_ntop(AF_INET, &(from.sin_addr), str, INET_ADDRSTRLEN);
 				debug("ip: %s\n", str);
-				//TODO: add comparing ip as string with whitelist of hosts
+				//comparing ip as string with whitelist of hosts
+				if (in_whitelist(str))
+				{
+					debug("ip %s is in whitelist\n", str);
+				}
+				else
+				{
+					debug("ip %s is NOT in whitelist\n", str);
+				}
 			}
 
 			//get ip-header length
@@ -298,8 +334,19 @@ void dns_daemon()
 
 			pkt = calloc(1, sizeof(struct dns_packet));
 			dns_request_parse(pkt, buf + iph_length + UDPH_LENGTH, req_size);
-
 			dns_print_packet(pkt);
+
+			//forward packet to google 8.8.8.8 DNS
+			memset(bufsend, 0x0, PACKET_SIZE+4);
+			memcpy(bufsend, buf, req_size);
+
+			sent_bytes = sendto(dns_server.listenfd, bufsend, req_size, 0, 
+						(struct sockaddr*)&dest_addr, sizeof(dest_addr));
+			printf("sent bytes: %zd\n", sent_bytes);
+			if (sent_bytes < 0)
+			{
+				printf("error: failed to send packet. error: %s\n", strerror(errno));
+			}
 
 			free(pkt->data);
 			free(pkt);
