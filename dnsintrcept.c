@@ -31,13 +31,18 @@
 #endif
 
 #define APP_NAME "[dsn_interceptor] "
-#define VERSION "0.2"
+#define VERSION "0.4"
 
 #define CONFIG_NAME "/etc/boot-menu.txt"
 
 #define PACKET_SIZE 512
 #define INET_ADDRSTRLEN 16
 #define UDPH_LENGTH 8 
+
+//whitelist
+#define WHITE_LIST_SIZE 2048
+#define WHITE_LIST_FILENAME "au.dat"
+#define WHITE_LIST_LINELENGTH 128
 
 //-------------------------------------- structs  ----------------------
 struct dns_config
@@ -95,6 +100,12 @@ struct dns_question
 	u_int16_t qtype;
 	u_int16_t qclass;
 };
+
+//-------------------------------------- globals -----------------------
+char whitelist[WHITE_LIST_SIZE][WHITE_LIST_LINELENGTH] = {0};
+unsigned int whitelist_hosts = 0;	//global num of hosts in whitelist
+unsigned int new_whitelist = 1;		//set to 1 if new whitelist found
+
 //-------------------------------------- funcs -------------------------
 int init()
 {
@@ -252,13 +263,61 @@ int dns_request_parse(struct dns_packet *pkt, void *data, u_int16_t size)
 	return 1;
 }
 
-
-//check if there is new whitelist and download
+//check if there is new whitelist and download and save it as file au.dat
 void get_whitelist()
 {
+	int i;
+	int lines_cnt = 0; 
+	char line[WHITE_LIST_LINELENGTH] = {0};
 
+	if (new_whitelist)
+	{
+		FILE *f = fopen(WHITE_LIST_FILENAME, "r");
+		if (!f)
+		{
+			printf("failed to open whitelist\n");
+			return;
+		}
+		
+		whitelist_hosts = 0;
+		memset(whitelist, 0x0, sizeof(whitelist));
+			
+		while(fgets(line, sizeof(line), f))
+		{	//skip first line
+			if (!lines_cnt)
+			{
+				lines_cnt++; continue;	
+			}
 
+			//add ip till slash to whitelist
+			for (i = 0; i < WHITE_LIST_LINELENGTH; i++)
+			{
+				if (line[i] == '/')
+				{
+					//debug("found slash\n");
+					break;
+				}
+			}
 
+			//debug("num of chars to copy: %d\n", i);
+			if (i < WHITE_LIST_LINELENGTH)
+				strncpy(whitelist[whitelist_hosts++], line, i);
+			
+			if (++lines_cnt == WHITE_LIST_SIZE)
+				break;
+		}
+
+		//just debug
+		printf("-----whitelist hosts: %d -----\n", whitelist_hosts);
+		for (i = 0; i < whitelist_hosts; i++)
+		{
+			printf("#%d. %s\n", i, whitelist[i]);	
+		}
+
+		fclose(f);
+
+		new_whitelist = 0;
+	}
 }
 
 //return 1 if in whitelist, 0 if not
@@ -266,10 +325,12 @@ int in_whitelist(char *str)
 {
 	int rv = 0;
 
+
 	//TODO:
 	//go through list of whitelisted ip addresses
 	// if found - break and return 1
 	// else - return 0
+	
 
 	return rv;
 }
