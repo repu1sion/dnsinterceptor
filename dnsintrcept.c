@@ -31,7 +31,7 @@
 #endif
 
 #define APP_NAME "[dsn_interceptor] "
-#define VERSION "0.4"
+#define VERSION "0.5"
 
 #define CONFIG_NAME "/etc/boot-menu.txt"
 
@@ -155,6 +155,39 @@ int init()
 
 	return rv;
 }
+
+int init_tx_socket()
+{
+	int rv = 0;
+
+	//for setsockopt()
+	int one = 1;
+	const int *val = &one;
+
+	rv = socket(AF_INET, SOCK_RAW, IPPROTO_UDP);
+	if (rv < 0)
+	{
+		printf("can't open socket\n");
+		rv = -1; return rv;
+	}
+	else
+	{
+		debug("tx socket opened with value: %d\n", rv);
+	}
+
+	/*Inform the kernel do not fill up the packet structure. we will build our own...*/
+
+	if(setsockopt(rv, IPPROTO_IP, IP_HDRINCL, val, sizeof(one)) < 0)
+	{
+		rv = -2;
+		perror("setsockopt() error");
+	}
+	else
+		printf("setsockopt() is OK.\n");
+
+	return rv;
+}
+
 
 void hexdump(void *addr, unsigned int size)
 {
@@ -335,7 +368,7 @@ int in_whitelist(char *str)
 	return rv;
 }
 
-void dns_daemon()
+void dns_daemon(int tx_socket_num)
 {
 	int req_size;
 	ssize_t sent_bytes;
@@ -358,60 +391,75 @@ void dns_daemon()
 
 	printf("Accepting connections on %s\n", dns_server.config.host);
 	while(1)
-	{
+	{	//check for new whitelist, dl, save etc
 		get_whitelist();
 
-
+		//we get packet starting from IP header.
 		//socket, buf, buf_size, addr_from,
 		req_size = recvfrom(dns_server.listenfd, buf, PACKET_SIZE+4, 0, 
 					(struct sockaddr *)&from, &from_len);
-		debug("client: %s, bytes: %d\n", strerror(errno), req_size);
+		debug("rcvd : %s, bytes: %d\n", strerror(errno), req_size);
 
-		if (req_size >= 12) //min size is 12 bytes
+		if (req_size < 12) //min size is 12 bytes
 		{
-			debug("-----packet dump-----:\n");
-			hexdump(buf, req_size);
-
-			if (from.sin_family == AF_INET)
-			{
-				//get ip address
-				inet_ntop(AF_INET, &(from.sin_addr), str, INET_ADDRSTRLEN);
-				debug("ip: %s\n", str);
-				//comparing ip as string with whitelist of hosts
-				if (in_whitelist(str))
-				{
-					debug("ip %s is in whitelist\n", str);
-				}
-				else
-				{
-					debug("ip %s is NOT in whitelist\n", str);
-				}
-			}
-
-			//get ip-header length
-			iph_length = (buf[0] & 0x0f) * 4;
-			debug("skip ip header with length: %d and udp header with length: %d\n",
-				 iph_length, UDPH_LENGTH);
-
-			pkt = calloc(1, sizeof(struct dns_packet));
-			dns_request_parse(pkt, buf + iph_length + UDPH_LENGTH, req_size);
-			dns_print_packet(pkt);
-
-			//forward packet to google 8.8.8.8 DNS
-			memset(bufsend, 0x0, PACKET_SIZE+4);
-			memcpy(bufsend, buf, req_size);
-
-			sent_bytes = sendto(dns_server.listenfd, bufsend, req_size, 0, 
-						(struct sockaddr*)&dest_addr, sizeof(dest_addr));
-			printf("sent bytes: %zd\n", sent_bytes);
-			if (sent_bytes < 0)
-			{
-				printf("error: failed to send packet. error: %s\n", strerror(errno));
-			}
-
-			free(pkt->data);
-			free(pkt);
+			printf("error: packet size is less than min size, skip.\n");
+			continue;
 		}
+
+		debug("-----packet dump-----:\n");
+		hexdump(buf, req_size);
+
+		//ipv4 common packet
+		if (from.sin_family == AF_INET)
+		{
+			//get ip address
+			inet_ntop(AF_INET, &(from.sin_addr), str, INET_ADDRSTRLEN);
+			debug("ip: %s\n", str);
+			//comparing ip as string with whitelist of hosts
+			if (in_whitelist(str))
+			{
+				debug("ip %s is in whitelist\n", str);
+			}
+			else
+			{
+				debug("ip %s is NOT in whitelist\n", str);
+			}
+		}
+
+		//get ip-header length
+		iph_length = (buf[0] & 0x0f) * 4;
+		debug("skip ip header with length: %d and udp header with length: %d\n",
+			 iph_length, UDPH_LENGTH);
+
+		pkt = calloc(1, sizeof(struct dns_packet));
+		dns_request_parse(pkt, buf + iph_length + UDPH_LENGTH, req_size);
+		dns_print_packet(pkt);
+
+		//forward packet to google 8.8.8.8 DNS -------------------------
+		memset(bufsend, 0x0, PACKET_SIZE+4);
+		memcpy(bufsend, buf, req_size);
+
+		bufsend[16] = 8;
+		bufsend[17] = 8;
+		bufsend[18] = 8;
+		bufsend[19] = 8;
+
+
+
+
+		debug("-----fwd packet dump-----:\n");
+		hexdump(bufsend, req_size);
+
+		sent_bytes = sendto(tx_socket_num, bufsend, req_size, 0, 
+					(struct sockaddr*)&dest_addr, sizeof(dest_addr));
+		printf("sent bytes: %zd\n", sent_bytes);
+		if (sent_bytes < 0)
+		{
+			printf("error: failed to send packet. errno: %s\n", strerror(errno));
+		}
+
+		free(pkt->data);
+		free(pkt);
 	}
 }
 
@@ -429,7 +477,14 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	dns_daemon();
+	rv = init_tx_socket();
+	if (rv < 0)
+	{
+		printf("tx init failed\n");
+		return 1;
+	}
+
+	dns_daemon(rv);
 
 #if 0
 	while (1)
