@@ -31,9 +31,9 @@
 #endif
 
 #define APP_NAME "[dsn_interceptor] "
-#define VERSION "0.5"
+#define VERSION "0.7"
 
-#define CONFIG_NAME "/etc/boot-menu.txt"
+#define CONFIG_NAME "/etc/boot-menu.txt"	//XXX - rename config
 
 #define PACKET_SIZE 512
 #define INET_ADDRSTRLEN 16
@@ -43,6 +43,10 @@
 #define WHITE_LIST_SIZE 2048
 #define WHITE_LIST_FILENAME "au.dat"
 #define WHITE_LIST_LINELENGTH 128
+
+//OPTIONS
+//#define RAW_SOCKET
+
 
 //-------------------------------------- structs  ----------------------
 struct dns_config
@@ -119,15 +123,18 @@ int init()
 	dns_server.config.config_file = NULL;
 	dns_server.config.fg = 0;
 	dns_server.config.port = 53;
-	dns_server.config.host = "127.0.0.1";
+	dns_server.config.host = "127.0.0.1";	//XXX - not used actually, INADDR_ANY used instead
 
 	dns_server.listenfd = 0;
 
 	debug("Opening sockets.\n");
 
-	//sd = socket(AF_INET, SOCK_DGRAM, 0);
 	// Raw udp sockets are used to send manually constructed udp packets. 
+#ifdef RAW_SOCKET
 	sd = socket(AF_INET, SOCK_RAW, IPPROTO_UDP);
+#else
+	sd = socket(AF_INET, SOCK_DGRAM, 0);
+#endif
 	if (sd < 0)
 	{
 		printf("can't open socket\n");
@@ -141,7 +148,9 @@ int init()
 	memset((char *)&sin, 0x0, sizeof(sin));
 	sin.sin_family = AF_INET;
 	sin.sin_port = htons(dns_server.config.port);
-	sin.sin_addr.s_addr = inet_addr(dns_server.config.host);
+	//listen on all interfaces, not localhost only
+	sin.sin_addr.s_addr = INADDR_ANY;
+	//sin.sin_addr.s_addr = inet_addr(dns_server.config.host);
 
 	rv = bind(sd, (struct sockaddr *)&sin, sizeof(sin));
 	if (rv < 0)
@@ -156,15 +165,22 @@ int init()
 	return rv;
 }
 
+//return num of opened tx socket
 int init_tx_socket()
 {
-	int rv = 0;
+	int rv = -1;
+	struct sockaddr_in sin;
 
-	//for setsockopt()
+#ifdef RAW_SOCKET
 	int one = 1;
 	const int *val = &one;
+#endif
 
+#ifdef RAW_SOCKET
 	rv = socket(AF_INET, SOCK_RAW, IPPROTO_UDP);
+#else
+	rv = socket(AF_INET, SOCK_DGRAM, 0);
+#endif
 	if (rv < 0)
 	{
 		printf("can't open socket\n");
@@ -175,8 +191,23 @@ int init_tx_socket()
 		debug("tx socket opened with value: %d\n", rv);
 	}
 
-	/*Inform the kernel do not fill up the packet structure. we will build our own...*/
+	//setup udp source port to 53, so 8.8.8.8 will return response to this port
+	memset((char *)&sin, 0x0, sizeof(sin));
+	sin.sin_family = AF_INET;
+	sin.sin_port = htons(dns_server.config.port);
+	//listen on all interfaces, not localhost only
+	sin.sin_addr.s_addr = INADDR_ANY;
+	//sin.sin_addr.s_addr = inet_addr(dns_server.config.host);
 
+	if (bind(rv, (struct sockaddr *)&sin, sizeof(sin)) == -1)
+	{
+		printf("tx bind failed\n");
+		printf("error: %s \n", strerror(errno));
+		rv = -1; return rv;
+	}
+
+	/*Inform the kernel do not fill up the packet structure. we will build our own...*/
+#ifdef RAW_SOCKET
 	if(setsockopt(rv, IPPROTO_IP, IP_HDRINCL, val, sizeof(one)) < 0)
 	{
 		rv = -2;
@@ -184,6 +215,7 @@ int init_tx_socket()
 	}
 	else
 		printf("setsockopt() is OK.\n");
+#endif
 
 	return rv;
 }
@@ -368,11 +400,11 @@ int in_whitelist(char *str)
 	return rv;
 }
 
-void dns_daemon(int tx_socket_num)
+void dns_daemon()
 {
 	int req_size;
 	ssize_t sent_bytes;
-	int iph_length;
+	int iph_length = 0;
 	char str[INET_ADDRSTRLEN] = {0};
 	char buf[PACKET_SIZE+4] = {0};
 	char bufsend[PACKET_SIZE+4] = {0};
@@ -426,31 +458,34 @@ void dns_daemon(int tx_socket_num)
 			}
 		}
 
+#ifdef RAW_SOCKET
 		//get ip-header length
 		iph_length = (buf[0] & 0x0f) * 4;
 		debug("skip ip header with length: %d and udp header with length: %d\n",
 			 iph_length, UDPH_LENGTH);
-
+#endif
 		pkt = calloc(1, sizeof(struct dns_packet));
-		dns_request_parse(pkt, buf + iph_length + UDPH_LENGTH, req_size);
-		dns_print_packet(pkt);
+		//dns_request_parse(pkt, buf + iph_length + UDPH_LENGTH, req_size);
+		//dns_print_packet(pkt);
 
 		//forward packet to google 8.8.8.8 DNS -------------------------
 		memset(bufsend, 0x0, PACKET_SIZE+4);
 		memcpy(bufsend, buf, req_size);
+#ifdef RAW_SOCKET
+		bufsend[12] = 192;
+		bufsend[13] = 168;
+		bufsend[14] = 0;
+		bufsend[15] = 2;
 
 		bufsend[16] = 8;
 		bufsend[17] = 8;
 		bufsend[18] = 8;
 		bufsend[19] = 8;
-
-
-
-
+#endif
 		debug("-----fwd packet dump-----:\n");
 		hexdump(bufsend, req_size);
 
-		sent_bytes = sendto(tx_socket_num, bufsend, req_size, 0, 
+		sent_bytes = sendto(dns_server.listenfd, bufsend, req_size, 0, 
 					(struct sockaddr*)&dest_addr, sizeof(dest_addr));
 		printf("sent bytes: %zd\n", sent_bytes);
 		if (sent_bytes < 0)
@@ -476,15 +511,15 @@ int main(int argc, char *argv[])
 		printf("init failed\n");
 		return 1;
 	}
-
+#if 0
 	rv = init_tx_socket();
 	if (rv < 0)
 	{
 		printf("tx init failed\n");
 		return 1;
 	}
-
-	dns_daemon(rv);
+#endif
+	dns_daemon();
 
 #if 0
 	while (1)
